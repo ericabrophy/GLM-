@@ -1,0 +1,338 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(caret)
+library(arm)
+library(Seurat)
+library(ggplot2)
+library(readr)
+library(Matrix)
+library(dplyr)
+library(magrittr)
+library(tidyverse)
+library(plotly)
+library(data.table)
+library(ggpubr)
+library(ROCR)
+library(scorecard)
+library(pROC)
+library(lattice)
+library(boot)
+library(MLeval)
+library(cvTools)
+```
+
+
+```{r}
+load("/gpfs/commons/home/ebrophy/MDS_p1_10xdata/10x_mdsp1_counts.Rdata") #labeled as counts10x
+load("/gpfs/commons/home/ebrophy/MDS_p1_10xdata/10x_mdsp1_metadata.Rdata") #allintronmetadata
+load("/gpfs/commons/home/ebrophy/MDS_p1_ONTdata/MDS_seurat.integrated_updated.Rdata")
+
+#annotations
+x10x_annotations <- read_csv("~/MDS_p1_10xdata/10x_annotations.txt")
+newverdict <- read_csv("~/MDS_p1_10xdata/new_verdictdf.csv")
+distance_col <- read_csv("~/MDS_p1_10xdata/distance_df.csv")
+
+#proteincodinggenes
+leafcutter_annotations <- read_table2("/gpfs/commons/home/ebrophy/MDS_p1_ONTdata/leafcutter_introns.bed.gz", col_names = FALSE)
+```
+
+```{r}
+load("~/PCA_10x.RData")
+```
+
+
+add intron junction label 
+```{r}
+x10x_annotations$intron_junction <- paste(x10x_annotations$chr,":",x10x_annotations$start,":", x10x_annotations$end, sep="")
+```
+
+Creating lists for removing clusterID in junction matrix to match metadata
+```{r}
+#have to add cluster ID to intron junction label to match up with row names in junction matrix
+junction_list <- row.names(counts_10x)
+junction_list = as_tibble(junction_list) %>% separate(value, into = c("chr", "start", "end", "clusterID"), sep = ":") %>% mutate(intron_junction = paste(chr, start, end, sep = ":")) %>% select(intron_junction)
+```
+
+Add intron junction label into matrix
+```{r}
+counts_10x["intron_junction"] <- junction_list$intron_junction
+counts_10x <- counts_10x %>%
+  select(intron_junction, everything())
+```
+
+
+```{r}
+newverdict <- newverdict[,-1]
+x10x_annotations <- cbind(x10x_annotations, newverdict)
+
+distance_col <- distance_col[,-1]
+x10x_annotations <- cbind(x10x_annotations, distance_col)
+```
+
+
+```{r}
+#MDS p1 subset data from object
+MDS_p1 = subset(mds.samples.integrated_nomature, orig.ident == "MDS_P1")
+#There is a _1 in the integrated object for RNA data 
+counts_10x_barcodes <- colnames(counts_10x) 
+counts_10x_barcodes <- paste(counts_10x_barcodes,"_1", sep="")
+MDS_p1_barcodes <- colnames(MDS_p1@assays$RNA@data)
+
+#intersect matching barcodes 
+intersection <- counts_10x_barcodes %in% MDS_p1_barcodes
+#new intersecting barcode matrix
+barcode_subset = counts_10x[,intersection]
+colnames(barcode_subset) <- paste(colnames(barcode_subset), "_1", sep = "")
+#Junction matrix as an assay object
+MDS_p1[["counts_10x"]] = CreateAssayObject(counts = barcode_subset)
+#merge duplicate NA and AMB counts
+MDS_p1@meta.data[which(MDS_p1@meta.data$Genotype_1UMI == "NA" | MDS_p1@meta.data$Genotype_1UMI == "AMB"),]$Genotype_1UMI <- NA
+```
+
+```{r}
+MDS_p1 <- NormalizeData(MDS_p1, assay = "counts_10x", normalization.method = "LogNormalize", scale.factor = 10000)
+```
+```{r}
+MDS_p1 <- FindVariableFeatures(MDS_p1, assay = "counts_10x", selection.method = "vst", nfeatures = 2000)
+```
+
+```{r}
+#scale data by junction matrix
+MDS_p1 <- ScaleData(MDS_p1, assay = "counts_10x")
+```
+```{r}
+#Scale and PCA
+all.genes <- rownames(MDS_p1)
+MDS_p1 <- ScaleData(MDS_p1, features = all.genes)
+MDS_p1 <- RunPCA(MDS_p1, features = all.genes)
+```
+
+```{r}
+DimPlot(MDS_p1, reduction = "pca")
+```
+
+```{r}
+Idents(MDS_p1) = MDS_p1@meta.data$Genotype_1UMI
+levels(MDS_p1)
+DimPlot(MDS_p1, reduction = "pca")
+```
+
+
+```{r}
+Idents(MDS_p1) = MDS_p1@meta.data$Cell.Assignment.Final
+levels(MDS_p1)
+celltype_subset <- subset(MDS_p1, idents = c("IMP", "NP", "MkP", "MEP", "EP_1", "EP_2"))
+```
+```{r}
+#EP pca
+celltype_subset <- RunPCA(celltype_subset, features = all.genes)
+x <- DimPlot(celltype_subset, reduction = "pca")
+```
+
+```{r}
+DimPlot(celltype_subset, reduction = "pca", combine = TRUE, split.by = "Genotype_1UMI")
+```
+```{r}
+pca_cells <- celltype_subset@reductions[["pca"]]
+pca_embeddings <- pca_cells@cell.embeddings
+pca_embeddings <- as.data.frame(pca_embeddings)
+```
+
+
+#5 - > Genotype predictor variable 
+```{r}
+genotype_p1 <- MDS_p1@meta.data[["Genotype_1UMI"]]
+genotype_p1 <- as.data.frame(genotype_p1)
+rownames(genotype_p1) <- rownames(MDS_p1@meta.data)
+```
+
+Pull out genotyped cells
+```{r}
+genotyped_cells = MDS_p1@meta.data[which(MDS_p1@meta.data$Genotype_1UMI == "MUT"| MDS_p1@meta.data$Genotype_1UMI == "WT"),]
+genotyped_cell_list <- rownames(genotyped_cells) 
+```
+
+Pull out genotyped cell column for df 
+```{r}
+genotyped_subset <- genotyped_cells$Genotype_1UMI
+genotyped_subset <- factor(genotyped_subset, levels = c("WT", "MUT"))
+head(genotyped_subset)
+genotyped_subset <- as.data.frame(genotyped_subset)
+rownames(genotyped_subset) <- genotyped_cell_list
+```
+
+Match genotyped cells in df 
+```{r}
+geno_intersection <-  rownames(pca_embeddings) %in%  rownames(genotyped_cells)
+genotyped_dat <- pca_embeddings[geno_intersection,]
+```
+
+```{r}
+p <- rownames(genotyped_subset) %in% rownames(genotyped_dat)  
+genotyped_pca <- genotyped_subset[p,]
+genotyped_pca <- as.data.frame(genotyped_pca)
+```
+
+Add genotype col
+```{r}
+pca_df <- data.frame(genotyped_dat, genotyped_pca)
+colnames(pca_df)[51] <- "genotype"
+```
+
+
+Set random state
+```{r}
+set.seed(100)
+```
+
+First split data into training(80%) and test(20%) sets 
+```{r}
+#Randomly shuffle the data
+create_train_test <- function(pca_df, size = 0.8, train = TRUE) {
+    n_row = nrow(pca_df)
+    total_row = size * n_row
+    train_sample <- 1: total_row
+    if (train == TRUE) {
+        return (pca_df[train_sample, ])
+    } else {
+        return (pca_df[-train_sample, ])
+    }
+}
+train_test <- create_train_test(pca_df, 0.8, train = TRUE)
+holdout <- create_train_test(pca_df, 0.8, train = FALSE)
+dim(train_test)
+```
+
+```{r}
+# #Randomly shuffle the data
+# train_test = train_test[sample(nrow(train_test)),]
+# #Create 5 equally size folds
+# folds <- cut(seq(1,nrow(train_test)),breaks=5,labels=FALSE)
+```
+
+
+```{r}
+# for(i in 1:10){
+#   #Segement your data by fold using the which() function 
+#   testIndexes <- which(folds==1 | folds==2,arr.ind=TRUE)
+#   trainIndexes <- which(folds==3 | folds==4 | folds==5, arr.ind=TRUE)
+#   testing <- train_test[testIndexes, ]
+#   training <- train_test[trainIndexes, ]
+# }
+```
+
+New lists to append scores from GLM  
+```{r}
+#keep output scores in lists
+auc_list = list()
+roc_fpr = list()
+roc_tpr = list()
+thresholds = list()
+acc_list = list()
+```
+
+GLM model 
+```{r}
+for(i in 1:10){
+  
+  #randomly shuffle data
+  train_test = train_test[sample(nrow(train_test)),]
+  
+  #Create 5 equally size folds
+  folds <- cut(seq(1,nrow(train_test)),breaks=5,labels=FALSE)
+
+  testIndexes <- which(folds==1 | folds==2,arr.ind=TRUE)
+  trainIndexes <- which(folds==3 | folds==4 | folds==5, arr.ind=TRUE)
+  testing <- train_test[testIndexes, ]
+  training <- train_test[trainIndexes, ]
+
+  #model
+  model <- glm(formula = genotype~., data = training, family = binomial(link = "logit"))
+  print(summary(model))
+  
+  #predictions/ROC
+  response <- "genotype"
+  p <- predict(model, testing, type = "response") #proabilites
+  pr <- prediction(p, testing$genotype)
+  prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+  test_roc = roc(testing$genotype ~ p, data=testing, plot=TRUE,  grid=TRUE,
+                  print.auc=TRUE, asp = NA , legacy.axes = TRUE)
+  
+  #performance
+  auc <- performance(pr, measure = "auc")
+  auc <- auc@y.values[[1]]
+  auc_list = append(auc_list, auc)
+  
+  #confusion matrix
+  p_class <- ifelse(p > 0.50, "MUT", "WT")
+  confusionMatrix(factor(testing$genotype),factor(p_class))
+  
+  #accuracies
+  testing <- testing  %>% mutate(model_predict = 1 * (p > .50) + 0, visit_binary = 1 * 
+                                   (genotype == "Yes") + 0)
+  testing <- testing %>% mutate(accurate = 1 * (model_predict == visit_binary))
+  accuracy <- (sum(testing$accurate) / nrow(testing))
+  print(accuracy)
+  
+  #save scores in new df
+  evaluate_df <- data.frame(testing$accurate, p)
+  colnames(evaluate_df) <- c("binary_accuracy", "probabilities")
+  
+  performance_scores_df <- cbind(auc, accuracy)
+  performance_scores_df  <- as.data.frame(performance_scores_df)
+  acc_list = append(acc_list, performance_scores_df)
+  
+  #check residuals
+  par(mfrow = c(2, 2))
+  plot(model)
+
+}
+```
+
+GLM evaluation using holdout set
+```{r}
+eval_model <- glm(formula = genotype~., data = train_test, family = binomial(link = "logit"))
+print(summary(eval_model))
+
+#predictions/ROC
+response <- "genotype"
+p_h <- predict(model, holdout, type = "response") #proabilites
+pr_h <- prediction(p_h, holdout$genotype)
+prf_h <- performance(pr_h, measure = "tpr", x.measure = "fpr")
+test_roc_h = roc(holdout$genotype ~ p_h, data=train_test, plot=TRUE,  grid=TRUE,
+                  print.auc=TRUE, asp = NA, legacy.axes = TRUE)
+
+#performance
+auc_h <- performance(pr_h, measure = "auc")
+auc_h <- auc_h@y.values[[1]]
+auc_h
+
+#confusion matrix
+p_class_h <- ifelse(p_h > 0.50, "MUT", "WT")
+confusionMatrix(factor(holdout$genotype),factor(p_class_h))
+
+#accuracies
+holdout <- holdout  %>% mutate(model_predict = 1 * (p_h > .50) + 0, visit_binary = 1 * 
+                                 (genotype == "Yes") + 0)
+holdout <- holdout %>% mutate(accurate = 1 * (model_predict == visit_binary))
+accuracy_h <- (sum(holdout$accurate) / nrow(holdout))
+print(accuracy_h)
+
+#save scores in new df
+evaluate_df_h <- data.frame(holdout$accurate, p_h)
+colnames(evaluate_df_h) <- c("binary_accuracy", "probabilities")
+
+performance_scores_df_h <- cbind(auc_h, accuracy_h)
+performance_scores_df_h  <- as.data.frame(performance_scores_df_h)
+
+#check residuals
+par(mfrow = c(2, 2))
+plot(eval_model)
+```
+
+
