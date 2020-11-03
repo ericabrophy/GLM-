@@ -28,20 +28,6 @@ library(cvTools)
 
 
 ```{r}
-load("/gpfs/commons/home/ebrophy/MDS_p1_10xdata/10x_mdsp1_counts.Rdata") #labeled as counts10x
-load("/gpfs/commons/home/ebrophy/MDS_p1_10xdata/10x_mdsp1_metadata.Rdata") #allintronmetadata
-load("/gpfs/commons/home/ebrophy/MDS_p1_ONTdata/MDS_seurat.integrated_updated.Rdata")
-
-#annotations
-x10x_annotations <- read_csv("~/MDS_p1_10xdata/10x_annotations.txt")
-newverdict <- read_csv("~/MDS_p1_10xdata/new_verdictdf.csv")
-distance_col <- read_csv("~/MDS_p1_10xdata/distance_df.csv")
-
-#proteincodinggenes
-leafcutter_annotations <- read_table2("/gpfs/commons/home/ebrophy/MDS_p1_ONTdata/leafcutter_introns.bed.gz", col_names = FALSE)
-```
-
-```{r}
 load("~/PCA_10x.RData")
 ```
 
