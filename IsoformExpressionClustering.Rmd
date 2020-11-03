@@ -1,0 +1,318 @@
+---
+title: "Junction expression"
+output: html_notebook
+---
+
+
+```{r}
+library(ggplot2)
+library(gplots)
+library(Seurat)
+library(dplyr)
+library(magrittr)
+library(tidyverse)
+library(patchwork)
+library(plyr)
+library(hrbrthemes)
+library(plotly)
+library(pheatmap)
+library(heatmap.plus)
+```
+
+```{r}
+load("SplicingExpressionWS.RData")
+```
+
+```{r}
+#load data
+MDSmm <- read.table("MDS_matrix.counts.txt")
+data <- load("MDS_seurat.integrated.Rdata")
+metadata <- read.csv("MDS_metadata.csv")
+```
+
+```{r}
+#MDS p1 subset data from object
+MDS_p1 = subset(mds.samples.integrated, orig.ident == "MDS_P1")
+```
+
+```{r}
+#summary of MDS_p1
+#head(MDS_p1@assays)
+#colnames(MDSmm) #need to add a _1 to match p1 object
+#colnames(MDS_p1@assays$RNA@data)
+```
+
+```{r}
+#There is a _1 in the integrated object for RNA data 
+MDSmm_barcodes <- colnames(MDSmm) 
+MDSmm_barcodes <- paste(MDSmm_barcodes,"_1", sep="")
+MDS_p1_barcodes <- colnames(MDS_p1@assays$RNA@data)
+```
+
+```{r}
+#intersect matching barcodes 
+intersection <- MDSmm_barcodes %in% MDS_p1_barcodes
+```
+
+```{r}
+#new intersecting barcode matrix
+barcode_subset = MDSmm[,intersection]
+colnames(barcode_subset) <- paste(colnames(barcode_subset), "_1", sep = "")
+```
+
+
+```{r}
+#Junction matrix as an assay object
+MDS_p1[["JM"]] = CreateAssayObject(counts = barcode_subset)
+```
+```{r}
+#merge duplicate NA and AMB counts
+MDS_p1@meta.data[which(MDS_p1@meta.data$Genotype_1UMI == "NA" | MDS_p1@meta.data$Genotype_1UMI == "AMB"),]$Genotype_1UMI <- NA
+```
+
+```{r}
+#QC metrics
+VlnPlot(MDS_p1, assay = "JM", features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+```
+
+```{r}
+#feature to feature relationships
+FeatureScatter(MDS_p1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA" )
+```
+```{r}
+#normalization
+MDS_p1 <- NormalizeData(MDS_p1, assay = "JM", normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+```{r}
+#feature selection 
+MDS_p1 <- FindVariableFeatures(MDS_p1, assay = "JM", selection.method = "vst", nfeatures = 2000)
+```
+
+```{r}
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(MDS_p1, assay = "JM"), 10)
+top10
+```
+
+```{r}
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(MDS_p1, assay = "JM")
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+```
+
+```{r}
+#scale data by junction matrix
+MDS_p1 <- ScaleData(MDS_p1, assay = "JM")
+```
+
+```{r}
+#Scale and PCA
+all.genes <- rownames(MDS_p1)
+MDS_p1 <- ScaleData(MDS_p1, features = all.genes)
+MDS_p1 <- RunPCA(MDS_p1, features = all.genes)
+```
+
+```{r}
+#PCA
+#MDS_p1 <- RunPCA(MDS_p1, features = VariableFeatures(object = MDS_p1))
+```
+
+```{r}
+#top 5 PC
+print(MDS_p1[["pca"]], dims = 1:5, nfeatures = 10)
+```
+
+```{r} 
+#vizualize PC
+VizDimLoadings(MDS_p1, dims = 1:2, reduction = "pca")
+```
+
+```{r}
+DimPlot(MDS_p1, reduction = "pca")
+```
+
+```{r}
+DimHeatmap(MDS_p1, dims = 1, cells = 500, balanced = TRUE)
+ElbowPlot(MDS_p1)
+```
+
+```{r}
+MDS_p1 <- FindNeighbors(MDS_p1, dims = 1:10)
+MDS_p1 <- FindClusters(MDS_p1, resolution = 0.5)
+```
+
+```{r}
+head(Idents(MDS_p1), 5)
+```
+
+
+```{r}
+#UMAP
+MDS_p1 <- RunUMAP(MDS_p1, dims = 1:10)
+DimPlot(MDS_p1, reduction = "umap")
+```
+
+```{r}
+cluster1.markers <- FindMarkers(MDS_p1, ident.1 = 1, min.pct = 0.25)
+head(cluster1.markers, n = 5)
+```
+
+```{r}
+MDS_p1.markers <- FindAllMarkers(MDS_p1, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+MDS_p1.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
+```
+
+```{r}
+cluster1.markers <- FindMarkers(MDS_p1, ident.1 = 0, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+head(cluster1.markers, n = 5)
+```
+
+
+```{r}
+top10 <- MDS_p1.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+DoHeatmap(MDS_p1, features = top10$gene, label= TRUE) + NoLegend()
+```
+```{r}
+DoHeatmap(MDS_p1, features = unlist(TopFeatures(MDS_p1[["pca"]], balanced = TRUE)), size = 3, 
+    draw.lines = FALSE)
+```
+
+```{r}
+#new.cluster.ids <- c("HSPC")
+#names(new.cluster.ids) <- levels(MDS_p1)
+#MDS_p1 <- RenameIdents(MDS_p1, new.cluster.ids)
+plot <- DimPlot(MDS_p1, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+HoverLocator(plot = plot, information = FetchData(MDS_p1, vars = c("ident", "PC_1", "nFeature_RNA")))
+```
+
+
+```{r}
+#UMAP 1
+MDS_p1$UMAP_1 = MDS_p1@reductions$umap@cell.embeddings[,1]
+#UMAP 2
+MDS_p1$UMAP_2 = MDS_p1@reductions$umap@cell.embeddings[,2]
+```
+
+```{r}
+#overlay cell type onto junction clusters
+ggplot(MDS_p1@meta.data, mapping=aes(x=MDS_p1$UMAP_1, y=MDS_p1$UMAP_2), color=Cell.Assignment) + geom_point(aes(fill=Cell.Assignment), pch=21, size=1.5, stroke = 0.1) + theme_classic(base_size = 15)
+```
+
+```{r}
+#Data inside of seurat object
+MDS_p1[[]]
+```
+
+```{r}
+#rename levels to cell identites 
+Idents(MDS_p1) = MDS_p1@meta.data$Cell.Assignment
+levels(MDS_p1)
+```
+
+#Subset HSPC group 
+```{r}
+#subset cell types from JM data and make new object
+HSPC_p1 <- subset(MDS_p1, idents = "HSPC")
+```
+
+```{r}
+#HSPC pca
+HSPC_p1 <- RunPCA(HSPC_p1, features = all.genes)
+DimPlot(HSPC_p1, reduction = "pca")
+```
+
+```{r}
+#HSPC umap 
+HSPC_p1 <- RunUMAP(HSPC_p1, dims = 1:10)
+DimPlot(HSPC_p1, reduction = "umap")
+```
+
+```{r}
+#subset MUT and WT to overlay genotype
+Idents(HSPC_p1) = MDS_p1@meta.data$Genotype_1UMI
+levels(HSPC_p1)
+```
+#HSPC UMAP with genotype overlay
+```{r}
+#UMAP 1
+HSPC_p1$UMAP_1 = HSPC_p1@reductions$umap@cell.embeddings[,1]
+#UMAP 2
+HSPC_p1$UMAP_2 = HSPC_p1@reductions$umap@cell.embeddings[,2]
+```
+
+```{r}
+ggplot(HSPC_p1@meta.data, mapping=aes(x=HSPC_p1$UMAP_1, y=HSPC_p1$UMAP_2), label= TRUE, color=Idents(HSPC_p1)) + geom_point(aes(fill=Idents(HSPC_p1)), pch=21, size=1.5, stroke = 0.1) + theme_classic(base_size = 15)
+```
+#redo HSPC clustering with WT and MUT levels
+```{r}
+HSPC_p1_WT <- subset(HSPC_p1, idents = "WT")
+HSPC_p1_MUT <- subset(HSPC_p1, idents = "MUT")
+```
+
+```{r}
+#HSPC pca
+HSPC_p1_WT <- RunPCA(HSPC_p1_WT, features = all.genes)
+DimPlot(HSPC_p1_WT, reduction = "pca")
+```
+```{r}
+#HSPC umap 
+HSPC_p1_WT <- RunUMAP(HSPC_p1_WT, dims = 1:10)
+DimPlot(HSPC_p1_WT, reduction = "umap")
+```
+
+```{r}
+HSPC_p1_MUT <- RunPCA(HSPC_p1_MUT, features = all.genes)
+DimPlot(HSPC_p1_MUT, reduction = "pca")
+```
+```{r}
+#HSPC umap 
+HSPC_p1_MUT <- RunUMAP(HSPC_p1_MUT, dims = 1:10)
+DimPlot(HSPC_p1_MUT, reduction = "umap")
+```
+#HSPC with juction clusters 
+```{r}
+DimPlot(HSPC_p1, reduction = "umap", combine = TRUE, split.by = "seurat_clusters")
+```
+#Subset EP group
+```{r}
+#rename levels to cell identites 
+Idents(MDS_p1) = MDS_p1@meta.data$Cell.Assignment
+levels(MDS_p1)
+EP_p1 <- subset(MDS_p1, idents = c("EP_1", "EP_2", "EP_3"))
+```
+```{r}
+levels(EP_p1)
+```
+```{r}
+#EP pca
+EP_p1 <- RunPCA(EP_p1, features = all.genes)
+DimPlot(EP_p1, reduction = "pca")
+```
+```{r}
+#EP umap 
+EP_p1 <- RunUMAP(EP_p1, dims = 1:10)
+DimPlot(EP_p1, reduction = "umap")
+```
+```{r}
+#EP subset MUT and WT to overlay genotype
+Idents(EP_p1) = MDS_p1@meta.data$Genotype_1UMI
+levels(EP_p1)
+```
+#EP umap and genotype overlay
+```{r}
+#UMAP 1
+EP_p1$UMAP_1 = EP_p1@reductions$umap@cell.embeddings[,1]
+#UMAP 2
+EP_p1$UMAP_2 = EP_p1@reductions$umap@cell.embeddings[,2]
+```
+
+```{r}
+ggplot(EP_p1@meta.data, mapping=aes(x=EP_p1$UMAP_1, y=EP_p1$UMAP_2), label= TRUE, color=Idents(EP_p1)) + geom_point(aes(fill=Idents(EP_p1)), pch=21, size=1.5, stroke = 0.1) + theme_classic(base_size = 15)
+```
+#EP with juction clusters 
+```{r}
+DimPlot(EP_p1, reduction = "umap", combine = TRUE, split.by = "seurat_clusters")
+```
+
